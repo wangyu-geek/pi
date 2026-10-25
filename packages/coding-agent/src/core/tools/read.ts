@@ -1,7 +1,7 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { Api, ImageContent, Model, ModelImageResizeOptions, TextContent } from "@earendil-works/pi-ai";
-import { constants } from "fs";
-import { access as fsAccess, readFile as fsReadFile } from "fs/promises";
+import { constants, type Stats } from "fs";
+import { access as fsAccess, open as fsOpen, stat as fsStat } from "fs/promises";
 import { type Static, Type } from "typebox";
 import { processImage } from "../../utils/image-process.ts";
 import { detectSupportedImageMimeTypeFromFile } from "../../utils/mime.ts";
@@ -41,6 +41,45 @@ export interface ReadToolDetails {
 	truncation?: TruncationResult;
 }
 
+function specialFileKind(stat: Stats): string {
+	if (stat.isFIFO()) return "FIFO";
+	if (stat.isCharacterDevice()) return "character device";
+	if (stat.isBlockDevice()) return "block device";
+	if (stat.isSocket()) return "socket";
+	return "special file";
+}
+
+function unsupportedFileType(absolutePath: string, kind: string): Error {
+	return new Error(`Cannot read '${absolutePath}': it is a ${kind}, not a regular file.`);
+}
+
+/** Directories pass through so their existing EISDIR behavior is unchanged. */
+async function assertRegularFile(absolutePath: string): Promise<void> {
+	const stat = await fsStat(absolutePath);
+	if (stat.isFile() || stat.isDirectory()) return;
+	throw unsupportedFileType(absolutePath, specialFileKind(stat));
+}
+
+/**
+ * Verify the opened handle, not just the path. O_NONBLOCK keeps a FIFO from
+ * blocking the open when the path is swapped after the preflight check.
+ */
+async function readRegularFile(absolutePath: string): Promise<Buffer> {
+	const handle = await fsOpen(
+		absolutePath,
+		constants.O_RDONLY | (process.platform === "win32" ? 0 : constants.O_NONBLOCK),
+	);
+	try {
+		const stat = await handle.stat();
+		if (!stat.isFile() && !stat.isDirectory()) {
+			throw unsupportedFileType(absolutePath, specialFileKind(stat));
+		}
+		return await handle.readFile();
+	} finally {
+		await handle.close();
+	}
+}
+
 /**
  * Pluggable operations for the read tool.
  * Override these to delegate file reading to remote systems (for example SSH).
@@ -52,12 +91,15 @@ export interface ReadOperations {
 	access: (absolutePath: string) => Promise<void>;
 	/** Detect image MIME type, return null or undefined for non-images */
 	detectImageMimeType?: (absolutePath: string) => Promise<string | null | undefined>;
+	/** Reject FIFOs, devices and sockets before the image sniff opens them */
+	assertRegularFile?: (absolutePath: string) => Promise<void>;
 }
 
 const defaultReadOperations: ReadOperations = {
-	readFile: (path) => fsReadFile(path),
+	readFile: readRegularFile,
 	access: (path) => fsAccess(path, constants.R_OK),
 	detectImageMimeType: detectSupportedImageMimeTypeFromFile,
+	assertRegularFile,
 };
 
 export interface ReadToolOptions {
@@ -125,6 +167,8 @@ export function createReadToolDefinition(
 							if (aborted) return;
 							// Check if file exists and is readable.
 							await ops.access(absolutePath);
+							if (aborted) return;
+							await ops.assertRegularFile?.(absolutePath);
 							if (aborted) return;
 							const mimeType = ops.detectImageMimeType ? await ops.detectImageMimeType(absolutePath) : undefined;
 							let content: (TextContent | ImageContent)[];

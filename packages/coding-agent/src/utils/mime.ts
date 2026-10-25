@@ -1,3 +1,4 @@
+import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 
 const IMAGE_TYPE_SNIFF_BYTES = 4100;
@@ -23,8 +24,13 @@ export function detectSupportedImageMimeType(buffer: Uint8Array): string | null 
 }
 
 export async function detectSupportedImageMimeTypeFromFile(filePath: string): Promise<string | null> {
-	const fileHandle = await open(filePath, "r");
+	const fileHandle = await open(
+		filePath,
+		constants.O_RDONLY | (process.platform === "win32" ? 0 : constants.O_NONBLOCK),
+	);
 	try {
+		const stat = await fileHandle.stat();
+		if (!stat.isFile()) return null;
 		const buffer = Buffer.alloc(IMAGE_TYPE_SNIFF_BYTES);
 		const { bytesRead } = await fileHandle.read(buffer, 0, IMAGE_TYPE_SNIFF_BYTES, 0);
 		return detectSupportedImageMimeType(buffer.subarray(0, bytesRead));
