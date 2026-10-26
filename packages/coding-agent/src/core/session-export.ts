@@ -40,6 +40,6 @@ export function exportSessionToJsonl(
 	);
 	const dir = dirname(filePath);
 	if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-	writeFileSync(filePath, serializeSessionBranch(sessionManager, createTrailingEntries));
+	writeFileSync(filePath, serializeSessionBranch(sessionManager, createTrailingEntries), { mode: 0o600 });
 	return filePath;
 }
